@@ -1,0 +1,8 @@
+x.com
+.x.com
+twitter.com
+.twitter.com
+twimg.com
+.twimg.com
+t.co
+.t.co

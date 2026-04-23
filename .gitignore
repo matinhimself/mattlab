@@ -1,0 +1,12 @@
+mattlab
+spec
+config.json
+mattlab-*
+.mattlab_ca
+*.deb
+*.tar.gz
+*.zip
+build/
+.idea/
+.vscode/
+*.exe

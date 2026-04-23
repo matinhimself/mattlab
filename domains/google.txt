@@ -1,0 +1,23 @@
+# Google/Youtube domains for domain fronting
+youtube.com
+.youtube.com
+youtu.be
+.youtu.be
+yt.be
+.yt.be
+.ytimg.com
+ytimg.com
+.ggpht.com
+ggpht.com
+.googlevideo.com
+googlevideo.com
+.google.com
+google.com
+.gmail.com
+gmail.com
+.gstatic.com
+gstatic.com
+.googleapis.com
+googleapis.com
+.googleusercontent.com
+googleusercontent.com

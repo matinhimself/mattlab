@@ -1,0 +1,5 @@
+# Local/bypass domains
+localhost
+.local
+.lan
+127.0.0.1

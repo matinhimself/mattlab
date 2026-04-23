@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o mattlab-${{ matrix.goos }}-${{ matrix.goarch }} .
+      - name: Archive
+        run: |
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.zip mattlab-${{ matrix.goos }}-${{ matrix.goarch }}
+          else
+            tar czf mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz mattlab-${{ matrix.goos }}-${{ matrix.goarch }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mattlab-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  deb:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mattlab-linux-${{ matrix.arch }}
+      - name: Build .deb
+        run: |
+          tar xzf mattlab-linux-${{ matrix.arch }}.tar.gz
+          mkdir -p build/deb/opt/mattlab/domains
+          mkdir -p build/deb/etc/systemd/system
+          mkdir -p build/deb/DEBIAN
+          cp mattlab-linux-${{ matrix.arch }} build/deb/opt/mattlab/mattlab
+          cp domains/*.txt build/deb/opt/mattlab/domains/
+          export VERSION=${{ github.ref_name }}
+          export ARCH=${{ matrix.arch }}
+          envsubst < packaging/deb/control.tmpl > build/deb/DEBIAN/control
+          cp packaging/deb/mattlab.service build/deb/etc/systemd/system/
+          dpkg-deb --build build/deb mattlab_${{ github.ref_name }}_${{ matrix.arch }}.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mattlab-deb-${{ matrix.arch }}
+          path: "*.deb"
+
+  publish:
+    needs: [release, deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Create release
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            *.tar.gz *.zip *.deb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
