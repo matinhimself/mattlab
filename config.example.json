@@ -6,7 +6,10 @@
     "sni_proxy":   { "enabled": false, "port": 8443 },
     "http_proxy":  { "enabled": true, "port": 8085 },
     "socks5":      { "enabled": true, "port": 1080 },
-    "cert_server": { "enabled": true, "port": 8080 }
+    "cert_server": { "enabled": true, "port": 8080 },
+    "dns_server": {
+      "enabled": false, "port": 53
+    }
   },
 
   "outbounds": [
@@ -36,7 +39,9 @@
 
   "routes": [
     { "domains": "domains/google.txt", "outbound": "google-front" },
-    { "domains": "domains/local.txt",  "outbound": "direct" }
+    { "domains": "domains/x.txt", "outbound": "gas-relay" },
+    { "domains": "domains/local.txt",  "outbound": "direct" },
+    { "domains": "domains/relay_domains.txt", "outbound": "gas-relay" }
   ],
 
   "default_outbound": "direct"

@@ -1,10 +1,12 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config is the top-level configuration structure.
@@ -23,6 +25,18 @@ type Inbounds struct {
 	HTTPProxy  InboundServer `json:"http_proxy"`
 	SOCKS5     InboundServer `json:"socks5"`
 	CertServer InboundServer `json:"cert_server"`
+	DNSServer  DNSInbound    `json:"dns_server"`
+}
+
+// DNSInbound configures the built-in DNS server.
+type DNSInbound struct {
+	Enabled     bool   `json:"enabled"`
+	Port        int    `json:"port"`         // default 53
+	DoTPort     int    `json:"dot_port"`     // DNS-over-TLS port, default 853
+	Mode        string `json:"mode"`         // "sniproxy" or "doh"
+	UpstreamDNS string `json:"upstream_dns"` // plain DNS upstream, e.g. "8.8.8.8:53"
+	DoHURL      string `json:"doh_url"`      // e.g. "https://1.1.1.1/dns-query"
+	DoHOutbound string `json:"doh_outbound"` // outbound tag for domain fronting
 }
 
 // InboundServer is a single inbound server configuration.
@@ -89,9 +103,43 @@ func (c *Config) Validate(cfgDir string) error {
 	anyEnabled := c.Inbounds.SNIProxy.Enabled ||
 		c.Inbounds.HTTPProxy.Enabled ||
 		c.Inbounds.SOCKS5.Enabled ||
-		c.Inbounds.CertServer.Enabled
+		c.Inbounds.CertServer.Enabled ||
+		c.Inbounds.DNSServer.Enabled
 	if !anyEnabled {
 		return fmt.Errorf("at least one inbound must be enabled")
+	}
+
+	// Validate DNS server
+	if c.Inbounds.DNSServer.Enabled {
+		dns := &c.Inbounds.DNSServer
+		if dns.Port == 0 {
+			dns.Port = 53
+		}
+		if dns.DoTPort == 0 {
+			dns.DoTPort = 853
+		}
+		if dns.Mode == "" {
+			dns.Mode = "sniproxy"
+		}
+		switch dns.Mode {
+		case "sniproxy":
+			if dns.UpstreamDNS == "" {
+				if sys := systemDNS(); sys != "" {
+					dns.UpstreamDNS = sys
+				} else {
+					dns.UpstreamDNS = "8.8.8.8:53"
+				}
+			}
+		case "doh":
+			if dns.DoHURL == "" {
+				return fmt.Errorf("dns_server doh mode requires doh_url")
+			}
+			if dns.DoHOutbound == "" {
+				return fmt.Errorf("dns_server doh mode requires doh_outbound")
+			}
+		default:
+			return fmt.Errorf("dns_server mode must be \"sniproxy\" or \"doh\"")
+		}
 	}
 
 	// Build outbound tag set
@@ -148,6 +196,13 @@ func (c *Config) Validate(cfgDir string) error {
 		}
 	}
 
+	// Validate DNS doh_outbound references a known outbound
+	if c.Inbounds.DNSServer.Enabled && c.Inbounds.DNSServer.Mode == "doh" {
+		if _, ok := tags[c.Inbounds.DNSServer.DoHOutbound]; !ok {
+			return fmt.Errorf("dns_server doh_outbound %q not found in outbounds", c.Inbounds.DNSServer.DoHOutbound)
+		}
+	}
+
 	// Validate default_outbound
 	if c.DefaultOutbound == "" {
 		c.DefaultOutbound = "direct"
@@ -157,4 +212,29 @@ func (c *Config) Validate(cfgDir string) error {
 	}
 
 	return nil
+}
+
+// systemDNS reads the first nameserver from /etc/resolv.conf.
+func systemDNS() string {
+	f, err := os.Open("/etc/resolv.conf")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "nameserver") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				ip := fields[1]
+				if !strings.Contains(ip, ":") {
+					return ip + ":53"
+				}
+				return "[" + ip + "]:53"
+			}
+		}
+	}
+	return ""
 }

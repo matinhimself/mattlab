@@ -8,13 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
-	qrcode "github.com/skip2/go-qrcode"
-
 	"github.com/itsmatinhimself/mattlab/config"
+	mattdns "github.com/itsmatinhimself/mattlab/dns"
 	"github.com/itsmatinhimself/mattlab/relay"
 	"github.com/itsmatinhimself/mattlab/routing"
 	"github.com/itsmatinhimself/mattlab/tlsutil"
@@ -33,6 +31,7 @@ type Orchestrator struct {
 	httpProxy  *HTTPProxy
 	socks5     *SOCKS5Proxy
 	certServer *CertServer
+	dnsServer  *mattdns.Server
 }
 
 // NewOrchestrator creates a new orchestrator from config.
@@ -140,6 +139,57 @@ func (o *Orchestrator) Run() error {
 		go o.certServer.Serve()
 	}
 
+	if o.cfg.Inbounds.DNSServer.Enabled {
+		dnsCfg := &o.cfg.Inbounds.DNSServer
+		addr := fmt.Sprintf("%s:%d", o.cfg.ListenHost, dnsCfg.Port)
+
+		var handler mattdns.Handler
+		switch dnsCfg.Mode {
+		case "sniproxy":
+			listenIP := o.cfg.ListenHost
+			if listenIP == "" || listenIP == "0.0.0.0" {
+				detected, err := getOutboundIP()
+				if err != nil {
+					return fmt.Errorf("dns: cannot detect outbound IP: %w", err)
+				}
+				listenIP = detected
+			}
+			proxyIP := net.ParseIP(listenIP)
+			if proxyIP == nil {
+				return fmt.Errorf("dns: invalid listen IP: %s", listenIP)
+			}
+			upstream := mattdns.NewUpstreamResolver(dnsCfg.UpstreamDNS)
+			handler = mattdns.NewSNIProxyHandler(o.router, proxyIP, upstream, o.cfg.DefaultOutbound)
+		case "doh":
+			t, ok := o.transports[dnsCfg.DoHOutbound]
+			if !ok {
+				return fmt.Errorf("dns doh_outbound %q not found", dnsCfg.DoHOutbound)
+			}
+			resolver := mattdns.NewDoHResolver(dnsCfg.DoHURL, t)
+			handler = mattdns.NewDoHHandler(resolver)
+		}
+
+		// Generate TLS config for DoT using the MITM CA (cert will have IP SAN)
+		dotIP := o.cfg.ListenHost
+		if dotIP == "" || dotIP == "0.0.0.0" {
+			if ip, err := getOutboundIP(); err == nil {
+				dotIP = ip
+			}
+		}
+		dotTLS := o.mitm.GetTLSConfig(dotIP)
+
+		o.dnsServer = mattdns.NewServerWithDoT(addr, dnsCfg.DoTPort, handler, dotTLS)
+		if err := o.dnsServer.Start(); err != nil {
+			return err
+		}
+		go o.dnsServer.Serve()
+
+		// Tell cert server to offer the iOS profile with DNS settings
+		if o.certServer != nil {
+			o.certServer.SetDNS(dotIP, dnsCfg.Port, dnsCfg.DoTPort)
+		}
+	}
+
 	o.printBanner()
 
 	// Wait for signal
@@ -197,21 +247,12 @@ func (o *Orchestrator) printBanner() {
 	if o.cfg.Inbounds.SOCKS5.Enabled {
 		lines = append(lines, fmt.Sprintf("  SOCKS5:     %s:%d", host, o.cfg.Inbounds.SOCKS5.Port))
 	}
-	if o.cfg.Inbounds.CertServer.Enabled {
-		certURL := fmt.Sprintf("http://%s:%d/", host, o.cfg.Inbounds.CertServer.Port)
-		lines = append(lines, fmt.Sprintf("  Cert Page:  http://%s:%d", host, o.cfg.Inbounds.CertServer.Port))
-		if qr, err := qrcode.New(certURL, qrcode.Medium); err == nil {
-			lines = append(lines, "")
-			for _, l := range strings.Split(qr.ToString(false), "\n") {
-				if l != "" {
-					lines = append(lines, "  "+l)
-				}
-			}
-			lines = append(lines, "  Scan QR ↑ to open cert page on your phone")
-		}
+	if o.cfg.Inbounds.DNSServer.Enabled {
+		lines = append(lines, fmt.Sprintf("  DNS Server: %s:%d (%s), DoT :%d", host, o.cfg.Inbounds.DNSServer.Port, o.cfg.Inbounds.DNSServer.Mode, o.cfg.Inbounds.DNSServer.DoTPort))
 	}
-
-	lines = append(lines, fmt.Sprintf("  CA Cert:    %s", o.mitm.CACertPath()))
+	if o.cfg.Inbounds.CertServer.Enabled {
+		lines = append(lines, fmt.Sprintf("  Setup:      http://%s:%d  ← open on phone to install certs", host, o.cfg.Inbounds.CertServer.Port))
+	}
 	lines = append(lines, "", "  Press Ctrl+C to stop.", "")
 
 	for _, line := range lines {
@@ -224,6 +265,9 @@ func (o *Orchestrator) shutdown() {
 
 	shutdownTimeout := 3 * time.Second
 
+	if o.dnsServer != nil {
+		o.dnsServer.Stop()
+	}
 	if o.certServer != nil {
 		o.certServer.Stop()
 	}
