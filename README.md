@@ -183,11 +183,92 @@ youtube.com
 
 Modes: `sniproxy` (resolve upstream, reply with the proxy IP for routed domains) or `doh` (DNS-over-HTTPS via a configured outbound).
 
-## Psiphon + Akamai CDN Fronting
+## Psiphon + Akamai/Fastly CDN Fronting
 
-mattlab can act as a MITM proxy for [Psiphon](https://psiphon.ca/) clients modified to route through it (see `PsiphonOverMITM/`). It intercepts Psiphon's fronted-meek connections, re-dials Akamai CDN edges with a Chrome-83 uTLS fingerprint, and passes the negotiated ALPN through — matching what Psiphon's `FrontedMeekDialOverrides` expects.
+mattlab replaces Xray in the [MITM-DomainFronting](https://github.com/patterniha/MITM-DomainFronting) approach for Psiphon. It requires a patched Psiphon client (see `PsiphonOverMITM/`) that uses mattlab as its upstream proxy.
 
-When hardcoded Akamai IPs are TCP-blocked, mattlab falls back to CDN hostnames (e.g. `a248.e.akamai.net`) which DNS-resolve to locally-reachable edge IPs.
+### How it works
+
+```
+Psiphon (patched)
+  │  upstream proxy: 127.0.0.1:10808
+  ▼
+mattlab HTTP/SOCKS5 proxy
+  │  MITM: terminates client TLS, re-dials CDN with Chrome-83 uTLS
+  │
+  ├── ~akamai hostnames  ──► akamai-mitm ──► Akamai CDN edge ──► Psiphon meek server
+  ├── Akamai IPs (9x)   ──► akamai-mitm ──► (same, via DNS fallback)
+  ├── Fastly IPs        ──► fastly-mitm ──► Fastly CDN (pypi.org front) ──► Psiphon meek server
+  └── everything else   ──► direct
+```
+
+Psiphon's `FrontedMeekDialOverrides` (injected by the patch) tells tunnel-core to use Chrome-83 TLS profile, per-IP SNI, and `http/1.1` ALPN for Akamai and `h2`+`http/1.1` for Fastly. mattlab matches this exactly.
+
+### Handling blocked CDN IPs
+
+Psiphon hardcodes 9 specific Akamai edge IPs. When these are TCP-blocked (common in Iran), mattlab tries CDN hostnames first (`a248.e.akamai.net`, `a.akamaized.net`) which DNS-resolve to locally-reachable Akamai edges. The meek `Host:` header inside the tunnel routes the request to Psiphon's origin regardless of which edge is used.
+
+### Certificate setup
+
+mattlab auto-generates a local CA on first run (stored in `.mattlab_ca/` next to the config). Install the CA on the device:
+
+- **Windows/Android:** open `http://<host>:8080` in a browser — the cert server serves the CA cert and an iOS/Android profile for download.
+- mattlab signs per-domain certs on the fly; no manual cert management needed.
+
+### Recommended config for Psiphon use
+
+```json
+{
+  "inbounds": {
+    "http_proxy":  { "enabled": true, "port": 10808 },
+    "socks5":      { "enabled": true, "port": 10809 },
+    "cert_server": { "enabled": true, "port": 8080  }
+  },
+  "outbounds": [
+    {
+      "tag": "akamai-mitm",
+      "type": "domain_front",
+      "target_ips": [
+        "a248.e.akamai.net",
+        "a.akamaized.net",
+        "23.215.0.206", "23.215.0.203",
+        "23.212.250.91", "23.212.250.78",
+        "23.12.147.13",  "23.12.147.29",
+        "23.73.207.8",   "23.73.207.15",
+        "92.123.102.43"
+      ],
+      "target_port": 443,
+      "front_sni": "",
+      "fingerprint": "chrome"
+    },
+    {
+      "tag": "fastly-mitm",
+      "type": "domain_front",
+      "target_ips": ["pypi.org"],
+      "target_port": 443,
+      "front_sni": "pypi.org",
+      "fingerprint": "chrome"
+    },
+    { "tag": "direct", "type": "direct" }
+  ],
+  "routes": [
+    { "domains": "domains/psiphon-akamai.txt",     "outbound": "akamai-mitm" },
+    { "domains": "domains/psiphon-akamai-ips.txt", "outbound": "akamai-mitm" },
+    { "geoip": "geoip.dat", "geocode": "FASTLY",   "outbound": "fastly-mitm" }
+  ],
+  "default_outbound": "direct"
+}
+```
+
+Then set Psiphon's upstream proxy to `127.0.0.1:10808` (HTTP) or `127.0.0.1:10809` (SOCKS5).
+
+### Domain lists
+
+| File | Matches | Routes to |
+|---|---|---|
+| `domains/psiphon-akamai.txt` | any hostname containing `akamai` | `akamai-mitm` |
+| `domains/psiphon-akamai-ips.txt` | the 9 specific Psiphon Akamai IPs | `akamai-mitm` |
+| GeoIP `FASTLY` | Fastly IP ranges | `fastly-mitm` |
 
 ## Acknowledgements
 
