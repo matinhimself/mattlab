@@ -2,30 +2,27 @@ package routing
 
 import (
 	"bufio"
+	"net"
 	"os"
 	"strings"
 )
-
-// Rule represents a single domain matching rule.
-type Rule struct {
-	Exact   string // exact match (e.g. "youtube.com")
-	Suffix  string // suffix match (e.g. ".youtube.com")
-	Keyword string // keyword/contains match (e.g. "blogspot")
-}
 
 // DomainList holds parsed rules loaded from a .txt file.
 type DomainList struct {
 	Exact    map[string]bool
 	Suffixes []string
 	Keywords []string
+	CIDRs    []*net.IPNet // IP range matching (e.g. 151.101.0.0/16)
 }
 
 // LoadDomainList reads a domain list file.
 // Format: one rule per line.
-//   - "example.com"  → exact match
-//   - ".example.com" → suffix match (matches *.example.com AND example.com)
-//   - "~keyword"     → keyword/contains match
-//   - Empty lines and lines starting with # are ignored.
+//
+//	"example.com"      → exact match
+//	".example.com"     → suffix match (matches *.example.com AND example.com)
+//	"~keyword"         → keyword/contains match
+//	"1.2.3.0/24"       → CIDR range match (IPv4 or IPv6)
+//	Empty lines and lines starting with # are ignored.
 func LoadDomainList(path string) (*DomainList, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -47,6 +44,15 @@ func LoadDomainList(path string) (*DomainList, error) {
 
 		if strings.HasPrefix(line, "~") {
 			dl.Keywords = append(dl.Keywords, line[1:])
+		} else if strings.Contains(line, "/") {
+			// Try CIDR
+			_, ipNet, err := net.ParseCIDR(line)
+			if err == nil {
+				dl.CIDRs = append(dl.CIDRs, ipNet)
+				continue
+			}
+			// Not a valid CIDR — fall through to exact match
+			dl.Exact[line] = true
 		} else if strings.HasPrefix(line, ".") {
 			dl.Suffixes = append(dl.Suffixes, line)
 			// ".youtube.com" also matches "youtube.com"
@@ -59,7 +65,7 @@ func LoadDomainList(path string) (*DomainList, error) {
 	return dl, scanner.Err()
 }
 
-// Match checks if a hostname matches any rule in the list.
+// Match checks if a hostname or IP matches any rule in the list.
 func (dl *DomainList) Match(hostname string) bool {
 	h := strings.ToLower(strings.TrimRight(hostname, "."))
 
@@ -74,6 +80,16 @@ func (dl *DomainList) Match(hostname string) bool {
 	for _, kw := range dl.Keywords {
 		if strings.Contains(h, kw) {
 			return true
+		}
+	}
+	// CIDR check — only applies when the input is a bare IP address
+	if len(dl.CIDRs) > 0 {
+		if ip := net.ParseIP(h); ip != nil {
+			for _, cidr := range dl.CIDRs {
+				if cidr.Contains(ip) {
+					return true
+				}
+			}
 		}
 	}
 	return false

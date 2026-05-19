@@ -152,9 +152,21 @@ func (s *SOCKS5Proxy) handle(conn net.Conn) {
 		s.doDomainFront(ctx, conn, host, int(port), t)
 	case "relay":
 		s.doRelay(ctx, conn, host, int(port), t)
+	case "sni_forward":
+		s.doSNIForward(ctx, conn, host, int(port), t)
 	default:
 		s.doDirect(ctx, conn, host, int(port))
 	}
+}
+
+func (s *SOCKS5Proxy) doSNIForward(ctx context.Context, conn net.Conn, host string, port int, t transport.Transport) {
+	upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		log.Printf("[socks5] sni_forward dial failed for %s:%d: %v", host, port, err)
+		return
+	}
+	defer safeClose(upstream)
+	Pipe(ctx, conn, upstream)
 }
 
 func (s *SOCKS5Proxy) doDirect(ctx context.Context, conn net.Conn, host string, port int) {
@@ -167,24 +179,69 @@ func (s *SOCKS5Proxy) doDirect(ctx context.Context, conn net.Conn, host string, 
 }
 
 func (s *SOCKS5Proxy) doDomainFront(ctx context.Context, conn net.Conn, host string, port int, t transport.Transport) {
-	tlsConfig := s.mitm.GetTLSConfig(host)
-	if tlsConfig == nil {
+	// Read enough bytes to detect TLS and extract SNI before MITM.
+	peek := make([]byte, internal.SNIPeekSize)
+	conn.SetReadDeadline(time.Now().Add(internal.SNIPeekTimeout))
+	n, err := conn.Read(peek)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil || n == 0 {
+		log.Printf("[socks5] domain_front: read failed for %s: %v", host, err)
+		return
+	}
+	peek = peek[:n]
+	raw := newBufferedConn(conn, peek)
+
+	if peek[0] != 0x16 {
+		log.Printf("[socks5] domain_front: non-TLS (%#02x) for %s:%d — raw pipe", peek[0], host, port)
+		upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+		if err != nil {
+			log.Printf("[socks5] domain_front: upstream dial failed for %s:%d: %v", host, port, err)
+			return
+		}
+		defer safeClose(upstream)
+		sent, recv, _ := PipeCount(ctx, raw, upstream)
+		log.Printf("[socks5] domain_front: raw pipe done %s:%d sent=%d recv=%d", host, port, sent, recv)
 		return
 	}
 
-	tlsConn := tls.Server(conn, tlsConfig)
+	clientSNI := tlsutil.ParseSNI(peek)
+	log.Printf("[socks5] domain_front: TLS dest=%s:%d client_SNI=%q", host, port, clientSNI)
+
+	var tlsConfig *tls.Config
+	if dft, ok := t.(*transport.DomainFrontTransport); ok && len(dft.MITMALPNs()) > 1 {
+		tlsConfig = s.mitm.GetTLSConfigH2(host)
+	} else {
+		tlsConfig = s.mitm.GetTLSConfig(host)
+	}
+	if tlsConfig == nil {
+		return
+	}
+	tlsConn := tls.Server(raw, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		log.Printf("[socks5] MITM failed for %s client_SNI=%q: %v", host, clientSNI, err)
 		return
 	}
 	defer safeClose(tlsConn)
 
-	upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
+	cs := tlsConn.ConnectionState()
+	log.Printf("[socks5] MITM ok %s — client_SNI=%q negotiated_SNI=%q ALPN=%q", host, clientSNI, cs.ServerName, cs.NegotiatedProtocol)
+
+	var upstream net.Conn
+	var dialErr error
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		upstream, dialErr = dft.DialForwardWithALPN(ctx, fmt.Sprintf("%s:%d", host, port), cs.NegotiatedProtocol)
+	} else {
+		upstream, dialErr = t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	}
+	if dialErr != nil {
+		log.Printf("[socks5] domain_front: upstream dial failed for %s:%d: %v", host, port, dialErr)
 		return
 	}
 	defer safeClose(upstream)
 
-	Pipe(ctx, tlsConn, upstream)
+	log.Printf("[socks5] domain_front: pipe start %s:%d via %s", host, port, t.Name())
+	sent, recv, _ := PipeCount(ctx, tlsConn, upstream)
+	log.Printf("[socks5] domain_front: pipe done %s:%d sent=%d recv=%d", host, port, sent, recv)
 }
 
 func (s *SOCKS5Proxy) doRelay(ctx context.Context, conn net.Conn, host string, port int, t transport.Transport) {

@@ -35,9 +35,13 @@ jobs:
       - name: Archive
         run: |
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -r mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.zip mattlab-${{ matrix.goos }}-${{ matrix.goarch }} domains/ config.example.json
+            zip -r mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.zip \
+              mattlab-${{ matrix.goos }}-${{ matrix.goarch }} \
+              domains/ config.example.json geoip.dat
           else
-            tar czf mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz mattlab-${{ matrix.goos }}-${{ matrix.goarch }} domains/ config.example.json
+            tar czf mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz \
+              mattlab-${{ matrix.goos }}-${{ matrix.goarch }} \
+              domains/ config.example.json geoip.dat
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -66,6 +70,7 @@ jobs:
           cp mattlab-linux-${{ matrix.arch }} build/deb/opt/mattlab/mattlab
           cp domains/*.txt build/deb/opt/mattlab/domains/
           cp config.example.json build/deb/opt/mattlab/
+          cp geoip.dat build/deb/opt/mattlab/
           export VERSION=${{ github.ref_name }}
           export ARCH=${{ matrix.arch }}
           envsubst < packaging/deb/control.tmpl > build/deb/DEBIAN/control

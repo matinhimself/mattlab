@@ -1,0 +1,3 @@
+# Akamai CDN — matches any hostname containing "akamai"
+# Mirrors the Xray rule: regexp:.*akamai.*
+~akamai

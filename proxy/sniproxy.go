@@ -110,6 +110,8 @@ func (s *SNIProxy) handle(conn net.Conn) {
 			s.handleDomainFront(ctx, conn, peekData, sni, t)
 		case "relay":
 			s.handleRelay(ctx, conn, peekData, sni, t)
+		case "sni_forward":
+			s.handleSNIForward(ctx, conn, peekData, sni, t)
 		default:
 			s.handleDirect(ctx, conn, peekData, sni)
 		}
@@ -134,30 +136,59 @@ func (s *SNIProxy) handleDirect(ctx context.Context, conn net.Conn, peekData []b
 }
 
 func (s *SNIProxy) handleDomainFront(ctx context.Context, conn net.Conn, peekData []byte, sni string, t transport.Transport) {
-	tlsConfig := s.mitm.GetTLSConfig(sni)
-	if tlsConfig == nil {
-		log.Printf("[sni] failed to get TLS config for %s", sni)
+	if len(peekData) == 0 || peekData[0] != 0x16 {
+		log.Printf("[sni] domain_front: non-TLS (%#02x) for %s — raw pipe", firstByte(peekData), sni)
+		upstream, err := t.Dial(ctx, "tcp", sni+":443")
+		if err != nil {
+			log.Printf("[sni] domain_front: upstream dial failed for %s: %v", sni, err)
+			return
+		}
+		defer safeClose(upstream)
+		upstream.Write(peekData)
+		sent, recv, _ := PipeCount(ctx, conn, upstream)
+		log.Printf("[sni] domain_front: raw pipe done %s sent=%d recv=%d", sni, sent, recv)
 		return
 	}
 
-	// Re-inject the peeked ClientHello so tls.Server can read it
+	tlsConfig := s.mitm.GetTLSConfig(sni)
+	if tlsConfig == nil {
+		log.Printf("[sni] domain_front: no TLS config for %s", sni)
+		return
+	}
 	bc := newBufferedConn(conn, peekData)
 	tlsConn := tls.Server(bc, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		log.Printf("[sni] MITM failed for %s: %v", sni, err)
+		log.Printf("[sni] MITM failed for %s client_SNI=%q: %v", sni, sni, err)
 		return
 	}
 	defer safeClose(tlsConn)
 
-	upstream, err := t.Dial(ctx, "tcp", sni+":443")
-	if err != nil {
-		log.Printf("[sni] domain_front dial failed for %s: %v", sni, err)
+	cs := tlsConn.ConnectionState()
+	log.Printf("[sni] MITM ok %s — client_SNI=%q negotiated_SNI=%q ALPN=%q", sni, sni, cs.ServerName, cs.NegotiatedProtocol)
+
+	var upstream net.Conn
+	var dialErr error
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		upstream, dialErr = dft.DialForwardWithALPN(ctx, sni+":443", cs.NegotiatedProtocol)
+	} else {
+		upstream, dialErr = t.Dial(ctx, "tcp", sni+":443")
+	}
+	if dialErr != nil {
+		log.Printf("[sni] domain_front: upstream dial failed for %s: %v", sni, dialErr)
 		return
 	}
 	defer safeClose(upstream)
 
-	log.Printf("[sni] domain_front pipe: %s", sni)
-	Pipe(ctx, tlsConn, upstream)
+	log.Printf("[sni] domain_front: pipe start %s via %s", sni, t.Name())
+	sent, recv, _ := PipeCount(ctx, tlsConn, upstream)
+	log.Printf("[sni] domain_front: pipe done %s sent=%d recv=%d", sni, sent, recv)
+}
+
+func firstByte(b []byte) byte {
+	if len(b) == 0 {
+		return 0
+	}
+	return b[0]
 }
 
 func (s *SNIProxy) handleRelay(ctx context.Context, conn net.Conn, peekData []byte, sni string, t transport.Transport) {
@@ -248,6 +279,19 @@ func (s *SNIProxy) handleRelay(ctx context.Context, conn net.Conn, peekData []by
 	}
 }
 
+func (s *SNIProxy) handleSNIForward(ctx context.Context, conn net.Conn, peekData []byte, sni string, t transport.Transport) {
+	upstream, err := t.Dial(ctx, "tcp", sni+":443")
+	if err != nil {
+		log.Printf("[sni] sni_forward dial failed for %s: %v", sni, err)
+		return
+	}
+	defer safeClose(upstream)
+
+	// Re-inject the peeked ClientHello so the CDN sees Psiphon's original SNI.
+	upstream.Write(peekData)
+	Pipe(ctx, conn, upstream)
+}
+
 func outboundType(t transport.Transport) string {
 	switch t.(type) {
 	case *transport.DirectTransport:
@@ -258,6 +302,8 @@ func outboundType(t transport.Transport) string {
 		return "domain_front"
 	case *transport.RelayTransport:
 		return "relay"
+	case *transport.SNIForwardTransport:
+		return "sni_forward"
 	default:
 		return "unknown"
 	}

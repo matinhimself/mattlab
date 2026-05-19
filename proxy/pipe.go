@@ -51,8 +51,19 @@ func (bc *bufferedConn) Read(p []byte) (int, error) {
 
 // Pipe performs bidirectional copying between two connections.
 func Pipe(ctx context.Context, a, b net.Conn) error {
+	_, _, err := PipeCount(ctx, a, b)
+	return err
+}
+
+// PipeCount is like Pipe but returns bytes sent in each direction (a→b, b→a).
+func PipeCount(ctx context.Context, a, b net.Conn) (int64, int64, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	type result struct {
+		n   int64
+		err error
+	}
 
 	var once sync.Once
 	closeBoth := func() {
@@ -63,24 +74,23 @@ func Pipe(ctx context.Context, a, b net.Conn) error {
 		})
 	}
 
-	errCh := make(chan error, 2)
+	chAB := make(chan result, 1)
+	chBA := make(chan result, 1)
+
 	go func() {
-		_, err := io.Copy(b, a)
-		errCh <- err
+		n, err := io.Copy(b, a)
+		chAB <- result{n, err}
 		closeBoth()
 	}()
 	go func() {
-		_, err := io.Copy(a, b)
-		errCh <- err
+		n, err := io.Copy(a, b)
+		chBA <- result{n, err}
 		closeBoth()
 	}()
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	r1 := <-chAB
+	r2 := <-chBA
+	return r1.n, r2.n, r1.err
 }
 
 // safeClose closes a connection. Errors from closing an already-closed

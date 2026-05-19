@@ -1,10 +1,16 @@
 package routing
 
 import (
+	"fmt"
 	"path/filepath"
 
 	"github.com/itsmatinhimself/mattlab/config"
 )
+
+// matcher is implemented by both DomainList and GeoIPMatcher.
+type matcher interface {
+	Match(host string) bool
+}
 
 // Router resolves hostnames to outbound tags based on the config routes.
 type Router struct {
@@ -13,8 +19,8 @@ type Router struct {
 }
 
 type routeEntry struct {
-	list *DomainList
-	tag  string
+	m   matcher
+	tag string
 }
 
 // NewRouter creates a Router from config. cfgDir is used to resolve
@@ -23,12 +29,25 @@ func NewRouter(routes []config.Route, defaultTag string, cfgDir string) (*Router
 	r := &Router{defaultTag: defaultTag}
 
 	for _, rt := range routes {
-		domainPath := filepath.Join(cfgDir, rt.Domains)
-		dl, err := LoadDomainList(domainPath)
-		if err != nil {
-			return nil, err
+		var m matcher
+		var err error
+
+		switch {
+		case rt.Domains != "":
+			domainPath := filepath.Join(cfgDir, rt.Domains)
+			m, err = LoadDomainList(domainPath)
+			if err != nil {
+				return nil, fmt.Errorf("load domain list %q: %w", rt.Domains, err)
+			}
+		case rt.GeoIP != "" && rt.GeoCode != "":
+			geoPath := filepath.Join(cfgDir, rt.GeoIP)
+			m, err = LoadGeoIP(geoPath, rt.GeoCode)
+			if err != nil {
+				return nil, fmt.Errorf("load geoip %q code %q: %w", rt.GeoIP, rt.GeoCode, err)
+			}
 		}
-		r.routes = append(r.routes, routeEntry{list: dl, tag: rt.Outbound})
+
+		r.routes = append(r.routes, routeEntry{m: m, tag: rt.Outbound})
 	}
 
 	return r, nil
@@ -38,7 +57,7 @@ func NewRouter(routes []config.Route, defaultTag string, cfgDir string) (*Router
 // First match wins. Falls back to defaultTag.
 func (r *Router) Classify(hostname string) string {
 	for _, re := range r.routes {
-		if re.list.Match(hostname) {
+		if re.m.Match(hostname) {
 			return re.tag
 		}
 	}

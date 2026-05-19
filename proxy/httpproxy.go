@@ -144,6 +144,8 @@ func (h *HTTPProxy) handleCONNECT(conn net.Conn, br *bufio.Reader, target string
 		h.doDomainFrontTunnel(ctx, conn, br, host, port, t)
 	case "relay":
 		h.doRelayTunnel(ctx, conn, br, host, port, t)
+	case "sni_forward":
+		h.doSNIForwardTunnel(ctx, conn, host, port, t)
 	default:
 		h.doDirectTunnel(ctx, conn, host, port)
 	}
@@ -325,6 +327,16 @@ func (h *HTTPProxy) forwardHTTP(conn net.Conn, method, targetURL string,
 	}
 }
 
+func (h *HTTPProxy) doSNIForwardTunnel(ctx context.Context, conn net.Conn, host string, port int, t transport.Transport) {
+	upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		log.Printf("[http] sni_forward dial failed for %s: %v", host, err)
+		return
+	}
+	defer safeClose(upstream)
+	Pipe(ctx, conn, upstream)
+}
+
 func (h *HTTPProxy) doDirectTunnel(ctx context.Context, conn net.Conn, host string, port int) {
 	upstream, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), internal.TCPConnectTimeout)
 	if err != nil {
@@ -336,34 +348,78 @@ func (h *HTTPProxy) doDirectTunnel(ctx context.Context, conn net.Conn, host stri
 }
 
 func (h *HTTPProxy) doDomainFrontTunnel(ctx context.Context, conn net.Conn, br *bufio.Reader, host string, port int, t transport.Transport) {
-	tlsConfig := h.mitm.GetTLSConfig(host)
-	if tlsConfig == nil {
-		log.Printf("[http] failed to get TLS config for %s", host)
+	// Merge any bytes the bufio.Reader buffered during CONNECT header parsing.
+	var raw net.Conn = conn
+	if bc := newBufferedConnFromReader(conn, br); bc != nil {
+		raw = bc
+	}
+
+	// Read enough bytes to detect TLS and extract SNI before MITM.
+	peek := make([]byte, internal.SNIPeekSize)
+	conn.SetReadDeadline(time.Now().Add(internal.SNIPeekTimeout))
+	n, err := raw.Read(peek)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil || n == 0 {
+		log.Printf("[http] domain_front: read failed for %s: %v", host, err)
+		return
+	}
+	peek = peek[:n]
+	raw = newBufferedConn(conn, peek)
+
+	if peek[0] != 0x16 {
+		// Not TLS (SSH, DNS-TCP, OSSH, etc.) — raw pipe, no MITM possible.
+		log.Printf("[http] domain_front: non-TLS proto (%#02x) for %s:%d — raw pipe", peek[0], host, port)
+		upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+		if err != nil {
+			log.Printf("[http] domain_front: CDN dial failed (dest=%s:%d via %s): %v", host, port, t.Name(), err)
+			return
+		}
+		defer safeClose(upstream)
+		sent, recv, _ := PipeCount(ctx, raw, upstream)
+		log.Printf("[http] domain_front: raw pipe done dest=%s:%d sent=%d recv=%d", host, port, sent, recv)
 		return
 	}
 
-	// br may have buffered TLS handshake bytes from the client;
-	// drain them so tls.Server can read the ClientHello.
-	var tlsRaw net.Conn = conn
-	if bc := newBufferedConnFromReader(conn, br); bc != nil {
-		tlsRaw = bc
-	}
+	clientSNI := tlsutil.ParseSNI(peek)
+	log.Printf("[http] domain_front: TLS dest=%s:%d client_SNI=%q", host, port, clientSNI)
 
-	tlsConn := tls.Server(tlsRaw, tlsConfig)
+	// TLS — proceed with MITM. Use h2+http/1.1 for Fastly (mirrors Xray tls-decrypt-h211).
+	var tlsConfig *tls.Config
+	if dft, ok := t.(*transport.DomainFrontTransport); ok && len(dft.MITMALPNs()) > 1 {
+		tlsConfig = h.mitm.GetTLSConfigH2(host)
+	} else {
+		tlsConfig = h.mitm.GetTLSConfig(host)
+	}
+	if tlsConfig == nil {
+		log.Printf("[http] domain_front: no TLS config for %s", host)
+		return
+	}
+	tlsConn := tls.Server(raw, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		log.Printf("[http] MITM failed for %s: %v", host, err)
+		log.Printf("[http] MITM failed for %s client_SNI=%q: %v", host, clientSNI, err)
 		return
 	}
 	defer safeClose(tlsConn)
 
-	upstream, err := t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
-		log.Printf("[http] domain_front dial failed for %s: %v", host, err)
+	cs := tlsConn.ConnectionState()
+	log.Printf("[http] MITM ok %s — client_SNI=%q negotiated_SNI=%q ALPN=%q", host, clientSNI, cs.ServerName, cs.NegotiatedProtocol)
+
+	var upstream net.Conn
+	var dialErr error
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		upstream, dialErr = dft.DialForwardWithALPN(ctx, fmt.Sprintf("%s:%d", host, port), cs.NegotiatedProtocol)
+	} else {
+		upstream, dialErr = t.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	}
+	if dialErr != nil {
+		log.Printf("[http] domain_front: CDN dial failed (dest=%s:%d via %s): %v", host, port, t.Name(), dialErr)
 		return
 	}
 	defer safeClose(upstream)
 
-	Pipe(ctx, tlsConn, upstream)
+	log.Printf("[http] domain_front: pipe start dest=%s:%d via %s", host, port, t.Name())
+	sent, recv, _ := PipeCount(ctx, tlsConn, upstream)
+	log.Printf("[http] domain_front: pipe done dest=%s:%d sent=%d recv=%d", host, port, sent, recv)
 }
 
 func (h *HTTPProxy) doRelayTunnel(ctx context.Context, conn net.Conn, br *bufio.Reader, host string, port int, t transport.Transport) {

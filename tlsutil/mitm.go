@@ -62,11 +62,26 @@ func (m *MITMManager) CACertPath() string {
 	return filepath.Join(m.caDir, "ca.crt")
 }
 
-// GetTLSConfig returns a *tls.Config for serving TLS with a cert valid
-// for the given domain. Results are cached.
+// GetTLSConfig returns a *tls.Config for serving TLS with a cert valid for
+// the given domain, advertising only http/1.1 (matches Xray tls-decrypt-h11).
 func (m *MITMManager) GetTLSConfig(domain string) *tls.Config {
+	return m.GetTLSConfigWithALPN(domain, false)
+}
+
+// GetTLSConfigH2 returns a config that also advertises h2 in addition to
+// http/1.1 (matches Xray tls-decrypt-h211, used for Fastly CDN path).
+func (m *MITMManager) GetTLSConfigH2(domain string) *tls.Config {
+	return m.GetTLSConfigWithALPN(domain, true)
+}
+
+func (m *MITMManager) GetTLSConfigWithALPN(domain string, h2 bool) *tls.Config {
+	key := domain
+	if h2 {
+		key = domain + ":h2"
+	}
+
 	m.mu.RLock()
-	if cfg, ok := m.certCache[domain]; ok {
+	if cfg, ok := m.certCache[key]; ok {
 		m.mu.RUnlock()
 		return cfg
 	}
@@ -75,13 +90,12 @@ func (m *MITMManager) GetTLSConfig(domain string) *tls.Config {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Double-check after acquiring write lock
-	if cfg, ok := m.certCache[domain]; ok {
+	if cfg, ok := m.certCache[key]; ok {
 		return cfg
 	}
 
-	cfg := m.generateDomainConfig(domain)
-	m.certCache[domain] = cfg
+	cfg := m.generateDomainConfig(domain, h2)
+	m.certCache[key] = cfg
 	return cfg
 }
 
@@ -167,7 +181,7 @@ func (m *MITMManager) createCA(keyPath, certPath string) error {
 	return nil
 }
 
-func (m *MITMManager) generateDomainConfig(domain string) *tls.Config {
+func (m *MITMManager) generateDomainConfig(domain string, h2 bool) *tls.Config {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil
@@ -223,10 +237,14 @@ func (m *MITMManager) generateDomainConfig(domain string) *tls.Config {
 		return nil
 	}
 
+	protos := []string{"http/1.1"}
+	if h2 {
+		protos = []string{"h2", "http/1.1"}
+	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   protos,
 	}
 }
 

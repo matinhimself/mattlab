@@ -48,12 +48,17 @@ type InboundServer struct {
 // Outbound defines how traffic exits the proxy.
 type Outbound struct {
 	Tag  string `json:"tag"`
-	Type string `json:"type"` // "domain_front", "relay", "direct", "block"
+	Type string `json:"type"` // "domain_front", "relay", "direct", "block", "sni_forward"
 
 	// domain_front fields
-	TargetIP   string `json:"target_ip,omitempty"`
-	TargetPort int    `json:"target_port,omitempty"`
-	FrontSNI   string `json:"front_sni,omitempty"`
+	TargetIP    string   `json:"target_ip,omitempty"`   // single address (legacy); use target_ips instead
+	TargetIPs   []string `json:"target_ips,omitempty"`  // CDN edge addresses to try in order
+	TargetPort  int      `json:"target_port,omitempty"`
+	FrontSNI    string   `json:"front_sni,omitempty"`   // empty = use each target address as its own SNI
+	Fingerprint string   `json:"fingerprint,omitempty"` // "chrome", "firefox", "safari", "edge", "random"
+
+	// sni_forward fields
+	FrontAddr string `json:"front_addr,omitempty"` // host:port of CDN edge
 
 	// relay fields
 	ScriptIDs    []string `json:"script_ids,omitempty"`
@@ -64,10 +69,13 @@ type Outbound struct {
 	H2Enabled    bool     `json:"h2_enabled,omitempty"`
 }
 
-// Route maps domain lists to outbound tags.
+// Route maps domain lists or GeoIP ranges to outbound tags.
+// Exactly one of Domains or (GeoIP+GeoCode) must be set.
 type Route struct {
-	Domains  string `json:"domains"`  // path to .txt file
-	Outbound string `json:"outbound"` // tag of an outbound
+	Domains  string `json:"domains,omitempty"`  // path to .txt domain list file
+	GeoIP    string `json:"geoip,omitempty"`    // path to geoip.dat binary
+	GeoCode  string `json:"geocode,omitempty"`  // code inside geoip.dat, e.g. "FASTLY"
+	Outbound string `json:"outbound"`           // tag of an outbound
 }
 
 // Load reads and validates a config file.
@@ -156,8 +164,12 @@ func (c *Config) Validate(cfgDir string) error {
 
 		switch ob.Type {
 		case "domain_front":
-			if ob.TargetIP == "" || ob.FrontSNI == "" {
-				return fmt.Errorf("domain_front outbound %q requires target_ip and front_sni", ob.Tag)
+			// Normalize: single target_ip → target_ips
+			if ob.TargetIP != "" && len(ob.TargetIPs) == 0 {
+				ob.TargetIPs = []string{ob.TargetIP}
+			}
+			if len(ob.TargetIPs) == 0 {
+				return fmt.Errorf("domain_front outbound %q requires target_ips (or target_ip)", ob.Tag)
 			}
 			if ob.TargetPort == 0 {
 				ob.TargetPort = 443
@@ -178,6 +190,10 @@ func (c *Config) Validate(cfgDir string) error {
 			if ob.Format == "" {
 				ob.Format = "form"
 			}
+		case "sni_forward":
+			if ob.FrontAddr == "" {
+				return fmt.Errorf("sni_forward outbound %q requires front_addr", ob.Tag)
+			}
 		case "direct", "block":
 			// no extra fields needed
 		default:
@@ -190,9 +206,19 @@ func (c *Config) Validate(cfgDir string) error {
 		if _, ok := tags[r.Outbound]; !ok {
 			return fmt.Errorf("route references unknown outbound tag: %s", r.Outbound)
 		}
-		domainPath := filepath.Join(cfgDir, r.Domains)
-		if _, err := os.Stat(domainPath); err != nil {
-			return fmt.Errorf("route domain file %q not found: %w", r.Domains, err)
+		switch {
+		case r.Domains != "":
+			domainPath := filepath.Join(cfgDir, r.Domains)
+			if _, err := os.Stat(domainPath); err != nil {
+				return fmt.Errorf("route domain file %q not found: %w", r.Domains, err)
+			}
+		case r.GeoIP != "" && r.GeoCode != "":
+			geoPath := filepath.Join(cfgDir, r.GeoIP)
+			if _, err := os.Stat(geoPath); err != nil {
+				return fmt.Errorf("route geoip file %q not found: %w", r.GeoIP, err)
+			}
+		default:
+			return fmt.Errorf("route for outbound %q must have either domains or geoip+geocode", r.Outbound)
 		}
 	}
 

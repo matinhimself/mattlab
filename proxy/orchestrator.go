@@ -66,7 +66,7 @@ func NewOrchestrator(cfg *config.Config, cfgDir string) (*Orchestrator, error) {
 			o.transports[ob.Tag] = transport.NewBlock()
 		case "domain_front":
 			o.transports[ob.Tag] = transport.NewDomainFront(
-				ob.TargetIP, ob.TargetPort, ob.FrontSNI,
+				ob.TargetIPs, ob.TargetPort, ob.FrontSNI, ob.Fingerprint,
 			)
 		case "relay":
 			client := relay.NewClient(
@@ -75,6 +75,8 @@ func NewOrchestrator(cfg *config.Config, cfgDir string) (*Orchestrator, error) {
 				ob.BatchEnabled, ob.H2Enabled,
 			)
 			o.transports[ob.Tag] = transport.NewRelay(client)
+		case "sni_forward":
+			o.transports[ob.Tag] = transport.NewSNIForward(ob.FrontAddr)
 		}
 	}
 
@@ -223,9 +225,27 @@ func (o *Orchestrator) printBanner() {
 	for _, ob := range o.cfg.Outbounds {
 		switch ob.Type {
 		case "domain_front":
-			lines = append(lines, fmt.Sprintf("  Outbound:   %s (domain_front → %s)", ob.Tag, ob.FrontSNI))
+			fp := ob.Fingerprint
+			if fp == "" {
+				fp = "go-tls"
+			}
+			target := ob.TargetIP
+			if len(ob.TargetIPs) > 0 {
+				if len(ob.TargetIPs) == 1 {
+					target = ob.TargetIPs[0]
+				} else {
+					target = fmt.Sprintf("%s +%d", ob.TargetIPs[0], len(ob.TargetIPs)-1)
+				}
+			}
+			sni := ob.FrontSNI
+			if sni == "" {
+				sni = "<per-ip>"
+			}
+			lines = append(lines, fmt.Sprintf("  Outbound:   %s (domain_front → %s, sni:%s, fp:%s)", ob.Tag, target, sni, fp))
 		case "relay":
 			lines = append(lines, fmt.Sprintf("  Outbound:   %s (relay, %d script(s))", ob.Tag, len(ob.ScriptIDs)))
+		case "sni_forward":
+			lines = append(lines, fmt.Sprintf("  Outbound:   %s (sni_forward → %s)", ob.Tag, ob.FrontAddr))
 		default:
 			lines = append(lines, fmt.Sprintf("  Outbound:   %s (%s)", ob.Tag, ob.Type))
 		}

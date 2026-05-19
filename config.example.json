@@ -18,7 +18,8 @@
       "type": "domain_front",
       "target_ip": "216.239.38.120",
       "target_port": 443,
-      "front_sni": "google.com"
+      "front_sni": "google.com",
+      "fingerprint": "chrome"
     },
     {
       "tag": "gas-relay",
@@ -33,6 +34,16 @@
       "batch_enabled": true,
       "h2_enabled": true
     },
+    {
+      "tag": "akamai-front",
+      "type": "sni_forward",
+      "front_addr": "92.123.102.43:443"
+    },
+    {
+      "tag": "fastly-front",
+      "type": "sni_forward",
+      "front_addr": "151.101.1.223:443"
+    },
     { "tag": "direct", "type": "direct" },
     { "tag": "block",  "type": "block" }
   ],
@@ -41,7 +52,8 @@
     { "domains": "domains/google.txt", "outbound": "google-front" },
     { "domains": "domains/x.txt", "outbound": "gas-relay" },
     { "domains": "domains/local.txt",  "outbound": "direct" },
-    { "domains": "domains/relay_domains.txt", "outbound": "gas-relay" }
+    { "domains": "domains/relay_domains.txt",         "outbound": "gas-relay"    },
+    { "geoip": "geoip.dat", "geocode": "FASTLY",      "outbound": "fastly-front" }
   ],
 
   "default_outbound": "direct"
