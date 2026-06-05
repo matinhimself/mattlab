@@ -6,6 +6,7 @@ mattlab-*
 *.deb
 *.tar.gz
 *.zip
+*.log
 build/
 .idea/
 .vscode/

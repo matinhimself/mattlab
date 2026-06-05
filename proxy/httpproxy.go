@@ -383,10 +383,10 @@ func (h *HTTPProxy) doDomainFrontTunnel(ctx context.Context, conn net.Conn, br *
 	clientSNI := tlsutil.ParseSNI(peek)
 	log.Printf("[http] domain_front: TLS dest=%s:%d client_SNI=%q", host, port, clientSNI)
 
-	// TLS — proceed with MITM. Use h2+http/1.1 for Fastly (mirrors Xray tls-decrypt-h211).
+	// TLS - proceed with MITM using the outbound profile's advertised ALPNs.
 	var tlsConfig *tls.Config
-	if dft, ok := t.(*transport.DomainFrontTransport); ok && len(dft.MITMALPNs()) > 1 {
-		tlsConfig = h.mitm.GetTLSConfigH2(host)
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		tlsConfig = h.mitm.GetTLSConfigWithALPN(host, dft.MITMALPNs())
 	} else {
 		tlsConfig = h.mitm.GetTLSConfig(host)
 	}

@@ -1,0 +1,106 @@
+{
+  "listen_host": "0.0.0.0",
+  "log_level": "warning",
+
+  "inbounds": {
+    "sni_proxy":   { "enabled": false, "port": 443 },
+    "http_proxy":  { "enabled": true,  "port": 10808 },
+    "socks5":      { "enabled": true,  "port": 10809 },
+    "cert_server": { "enabled": true,  "port": 8080 },
+    "dns_server":  {
+      "enabled": false,
+      "port": 53,
+      "mode": "doh",
+      "doh_url": "https://cloudflare-dns.com/dns-query",
+      "doh_outbound": "dns-mitm"
+    }
+  },
+
+  "outbounds": [
+    {
+      "tag": "dns-mitm",
+      "type": "domain_front",
+      "target_ips": ["1.1.1.1", "1.0.0.1"],
+      "target_port": 443,
+      "front_sni": "www.microsoft.com",
+      "verify_names": ["www.microsoft.com", "www.google.com", "dns.google", "cloudflare-dns.com", "one.one.one.one"],
+      "fingerprint": "chrome",
+      "alpn": ["h2", "http/1.1"],
+      "dial_original_destination": false,
+      "dial_concurrency": 20,
+      "dial_fallback_delay_ms": 300
+    },
+    {
+      "tag": "googlevideo-mitm",
+      "type": "domain_front",
+      "target_port": 443,
+      "front_sni": "www.google.com",
+      "verify_names": ["from_mitm", "www.google.com", "dns.google", "www.googlevideo.com", "www.youtube.com"],
+      "fingerprint": "chrome",
+      "alpn": ["http/1.1"],
+      "dial_original_destination": true,
+      "dial_concurrency": 20,
+      "dial_fallback_delay_ms": 300
+    },
+    {
+      "tag": "google-mitm",
+      "type": "domain_front",
+      "target_port": 443,
+      "front_sni": "www.google.com",
+      "verify_names": ["from_mitm", "www.google.com", "dns.google", "www.googlevideo.com", "www.youtube.com"],
+      "fingerprint": "chrome",
+      "alpn": ["h2", "http/1.1"],
+      "dial_original_destination": true,
+      "dial_concurrency": 20,
+      "dial_fallback_delay_ms": 300
+    },
+    {
+      "tag": "fastly-mitm",
+      "type": "domain_front",
+      "target_ips": ["github.githubassets.com"],
+      "target_port": 443,
+      "front_sni": "github.githubassets.com",
+      "verify_names": ["from_mitm", "www.python.org", "pypi.org", "fastly.com", "www.fastly.com", "developer.fastly.com", "reddit.com", "githubassets.com", "github.com", "github.io", "githubusercontent.com", "github.githubassets.com"],
+      "fingerprint": "chrome",
+      "alpn": ["h2", "http/1.1"],
+      "dial_original_destination": false,
+      "dial_concurrency": 20,
+      "dial_fallback_delay_ms": 300
+    },
+    {
+      "tag": "meta-mitm",
+      "type": "domain_front",
+      "target_port": 443,
+      "front_sni": "www.microsoft.com",
+      "verify_names": ["from_mitm", "www.google.com", "www.microsoft.com", "www.whatsapp.com", "www.facebook.com", "www.ar.meta.com", "www.fb.com", "www.whatsapp.net", "www.atlassolutions.com", "www.secure.facebook.com", "www.extern.facebook.com", "www.internet.org", "www.oculus.com", "www.wit.ai", "www.facebook-dns.com", "www.instagram.com", "www.meta.com", "www.external-disputes.meta.com", "www.fbe2e.com", "www.cloud.x2p.facebook.net", "www.secure.latest.facebook.com"],
+      "fingerprint": "chrome",
+      "alpn": ["h2", "http/1.1"],
+      "dial_original_destination": true,
+      "dial_concurrency": 20,
+      "dial_fallback_delay_ms": 300
+    },
+    { "tag": "direct", "type": "direct" },
+    { "tag": "block",  "type": "block" }
+  ],
+
+  "routes": [
+    { "geosite": "geosite.dat", "geocode": "CATEGORY-ADS-ALL", "outbound": "block" },
+    { "domains": "domains/local.txt",                         "outbound": "direct" },
+    { "geosite": "geosite.dat", "geocode": "PRIVATE",          "outbound": "direct" },
+    { "geosite": "geosite.dat", "geocode": "CATEGORY-IR",      "outbound": "direct" },
+    { "geosite": "geosite.dat", "geocode": "KHANACADEMY",      "outbound": "direct" },
+    { "domains": "domains/mitm-googlevideo.txt", "outbound": "googlevideo-mitm" },
+    { "geosite": "geosite.dat", "geocode": "GOOGLE",           "outbound": "google-mitm" },
+    { "geosite": "geosite.dat", "geocode": "FASTLY",           "outbound": "fastly-mitm" },
+    { "geosite": "geosite.dat", "geocode": "REDDIT",           "outbound": "fastly-mitm" },
+    { "geosite": "geosite.dat", "geocode": "CNN",              "outbound": "fastly-mitm" },
+    { "domains": "domains/mitm-fastly.txt",                    "outbound": "fastly-mitm" },
+    { "geosite": "geosite.dat", "geocode": "META",             "outbound": "meta-mitm" },
+    { "domains": "domains/mitm-blocked-ips.txt",               "outbound": "block" },
+    { "geoip": "geoip.dat", "geocode": "PRIVATE",              "outbound": "direct" },
+    { "geoip": "geoip.dat", "geocode": "IR",                   "outbound": "direct" },
+    { "geoip": "geoip.dat", "geocode": "FASTLY",               "outbound": "fastly-mitm" }
+  ],
+
+  "default_outbound": "direct"
+}

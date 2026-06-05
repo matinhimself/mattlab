@@ -17,7 +17,7 @@ Client
                              │
                              ▼
                           Router
-                  (domain lists, IP lists, GeoIP)
+             (domain lists, Geosite, IP lists, GeoIP)
                              │
                              ▼
                    Outbound Transport
@@ -30,11 +30,11 @@ Client
                    └──────────────────┘
 ```
 
-Traffic enters through one of the inbound servers (SNI proxy, HTTP CONNECT, SOCKS5, DNS). The router extracts the target hostname/IP and matches it against domain list files or GeoIP rules (first match wins, falls back to `default_outbound`). Matched traffic is sent through the corresponding outbound transport.
+Traffic enters through one of the inbound servers (SNI proxy, HTTP CONNECT, SOCKS5, DNS). The router extracts the target hostname/IP and matches it against domain list files, Xray/V2Ray `geosite.dat` categories, or GeoIP rules (first match wins, falls back to `default_outbound`). For IP rules, hostnames are resolved on demand and cached, matching Xray's `IPOnDemand` behavior. Matched traffic is sent through the corresponding outbound transport.
 
 ### Transports
 
-- **domain_front** — Intercepts client-side TLS (MITM), then re-dials a CDN edge with a Chrome uTLS fingerprint. Tries multiple target addresses in order; if the address is a hostname, DNS resolution picks a local non-blocked edge. ALPN negotiated in the MITM phase is passed through to the CDN connection.
+- **domain_front** — Intercepts client-side TLS (MITM), then re-dials a CDN edge with a Chrome uTLS fingerprint. Target attempts are staggered and raced with bounded concurrency; the last successful configured edge is preferred on later connections. Profiles can preserve the original destination or force a redirect target, advertise H1 or H2/H1 to clients, and verify the public upstream certificate against an allowlist.
 - **sni_forward** — Raw TCP tunnel through a CDN edge. No MITM, no certificate required on the client. The client's original TLS handshake (including SNI) passes through unchanged; the CDN routes it to the correct origin.
 - **relay** — HTTP requests forwarded through Google Apps Script endpoints over a domain-fronted connection. Supports H1 pooling, H2 multiplexing, request batching, and response coalescing.
 - **direct** — plain TCP, no MITM.
@@ -132,13 +132,20 @@ Config is a single JSON file. Domain lists and GeoIP files are referenced by rel
 |---|---|---|
 | `tag` | string | Unique name referenced by routes |
 | `type` | string | `domain_front`, `sni_forward`, `relay`, `direct`, `block` |
-| `target_ips` | string[] | CDN edge addresses to try in order (hostnames DNS-resolved at dial time) |
+| `target_ips` | string[] | Optional fallback or redirect CDN edge addresses to try in order (hostnames DNS-resolved at dial time) |
 | `target_ip` | string | Single CDN edge address (legacy; use `target_ips`) |
 | `target_port` | int | CDN edge port (default 443) |
 | `front_sni` | string | TLS SNI sent to CDN. Empty = use each target address as its own SNI |
 | `fingerprint` | string | uTLS fingerprint: `chrome` (Chrome-83), `chrome120`, `chrome133`, `firefox`, `safari`, `edge`, `random` |
+| `alpn` | string[] | Protocols advertised by the local MITM endpoint, such as `["http/1.1"]` or `["h2", "http/1.1"]` |
+| `verify_names` | string[] | Allowed public upstream certificate names. Use `from_mitm` to include the client destination hostname |
+| `dial_original_destination` | bool | Try the client destination before `target_ips` (default `true`). Set `false` for redirect-only profiles |
+| `dial_concurrency` | int | Maximum simultaneous target attempts (default `4`) |
+| `dial_fallback_delay_ms` | int | Delay before racing the next target (default `300`) |
 | `front_addr` | string | `host:port` of CDN edge for `sni_forward` |
 | `script_ids` | string[] | Google Apps Script IDs for `relay` |
+
+For compatibility with older Psiphon profiles, an empty `verify_names` list keeps the previous permissive upstream verification behavior. New browser profiles should always set `verify_names`.
 
 ### Route fields
 
@@ -147,6 +154,7 @@ Routes are evaluated in order; first match wins.
 | Field | Description |
 |---|---|
 | `domains` | Path to a domain list `.txt` file |
+| `geosite` + `geocode` | Path to an Xray/V2Ray `geosite.dat` file and category to match (e.g. `"GOOGLE"` or `"CATEGORY-ADS-ALL"`) |
 | `geoip` + `geocode` | Path to a GeoIP `.dat` file and the code to match (e.g. `"FASTLY"`) |
 | `outbound` | Tag of the outbound to use |
 
@@ -182,6 +190,29 @@ youtube.com
 ```
 
 Modes: `sniproxy` (resolve upstream, reply with the proxy IP for routed domains) or `doh` (DNS-over-HTTPS via a configured outbound).
+
+## Browser MITM Domain Fronting
+
+The [`config.mitm-domain-fronting.example.json`](config.mitm-domain-fronting.example.json) profile follows the current [MITM-DomainFronting v22 reference](https://github.com/patterniha/MITM-DomainFronting). It adds separate profiles for:
+
+| Profile | Traffic | Upstream behavior |
+|---|---|---|
+| `googlevideo-mitm` | YouTube video hosts | original destination, Google SNI, HTTP/1.1 |
+| `google-mitm` | Google and YouTube services | original destination, Google SNI, H2/H1 |
+| `fastly-mitm` | Reddit, GitHub, CNN, BuzzFeed, Fastly sites | redirect through `github.githubassets.com`, H2/H1 |
+| `meta-mitm` | Facebook, Instagram, WhatsApp, Meta sites | original destination, Microsoft SNI, H2/H1 |
+| `dns-mitm` | optional DoH queries | redirect through Cloudflare IPs |
+
+Place current Xray/V2Ray `geosite.dat` and `geoip.dat` files next to the config, then start with:
+
+```bash
+cp config.mitm-domain-fronting.example.json config.json
+./mattlab -c config.json
+```
+
+On first run mattlab creates `.mattlab_ca/ca.crt`. Open `http://<host>:8080` from the client device and install that personal CA only on devices you control.
+
+The profile mirrors the upstream routing order: ads block; local, private, Iranian, and Khan Academy domains direct; Google video over H1; Google over H2/H1; Fastly, Reddit, CNN, and BuzzFeed through the Fastly redirect; Meta services through the Meta profile; explicit blocked CIDRs; private and Iranian IPs direct; Fastly IPs through the Fastly redirect; then direct fallback. The small `domains/mitm-*.txt` files only cover upstream rules that are not Geosite categories.
 
 ## Psiphon + Akamai/Fastly CDN Fronting
 

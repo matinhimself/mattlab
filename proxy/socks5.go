@@ -208,8 +208,8 @@ func (s *SOCKS5Proxy) doDomainFront(ctx context.Context, conn net.Conn, host str
 	log.Printf("[socks5] domain_front: TLS dest=%s:%d client_SNI=%q", host, port, clientSNI)
 
 	var tlsConfig *tls.Config
-	if dft, ok := t.(*transport.DomainFrontTransport); ok && len(dft.MITMALPNs()) > 1 {
-		tlsConfig = s.mitm.GetTLSConfigH2(host)
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		tlsConfig = s.mitm.GetTLSConfigWithALPN(host, dft.MITMALPNs())
 	} else {
 		tlsConfig = s.mitm.GetTLSConfig(host)
 	}

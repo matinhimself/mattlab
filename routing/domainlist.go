@@ -10,6 +10,7 @@ import (
 // DomainList holds parsed rules loaded from a .txt file.
 type DomainList struct {
 	Exact    map[string]bool
+	IPs      map[string]bool
 	Suffixes []string
 	Keywords []string
 	CIDRs    []*net.IPNet // IP range matching (e.g. 151.101.0.0/16)
@@ -32,6 +33,7 @@ func LoadDomainList(path string) (*DomainList, error) {
 
 	dl := &DomainList{
 		Exact: make(map[string]bool),
+		IPs:   make(map[string]bool),
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -57,6 +59,8 @@ func LoadDomainList(path string) (*DomainList, error) {
 			dl.Suffixes = append(dl.Suffixes, line)
 			// ".youtube.com" also matches "youtube.com"
 			dl.Exact[line[1:]] = true
+		} else if ip := net.ParseIP(line); ip != nil {
+			dl.IPs[ip.String()] = true
 		} else {
 			dl.Exact[line] = true
 		}
@@ -82,14 +86,25 @@ func (dl *DomainList) Match(hostname string) bool {
 			return true
 		}
 	}
-	// CIDR check — only applies when the input is a bare IP address
-	if len(dl.CIDRs) > 0 {
-		if ip := net.ParseIP(h); ip != nil {
-			for _, cidr := range dl.CIDRs {
-				if cidr.Contains(ip) {
-					return true
-				}
-			}
+	if ip := net.ParseIP(h); ip != nil {
+		return dl.MatchIP(ip)
+	}
+	return false
+}
+
+// HasIPRules reports whether the list contains exact IP or CIDR rules.
+func (dl *DomainList) HasIPRules() bool {
+	return len(dl.IPs) > 0 || len(dl.CIDRs) > 0
+}
+
+// MatchIP checks an already-parsed IP against exact IP and CIDR rules.
+func (dl *DomainList) MatchIP(ip net.IP) bool {
+	if dl.IPs[ip.String()] {
+		return true
+	}
+	for _, cidr := range dl.CIDRs {
+		if cidr.Contains(ip) {
+			return true
 		}
 	}
 	return false

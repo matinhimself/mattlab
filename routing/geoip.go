@@ -20,7 +20,10 @@ func LoadGeoIP(path, code string) (*GeoIPMatcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read geoip: %w", err)
 	}
+	return loadGeoIP(data, path, code)
+}
 
+func loadGeoIP(data []byte, source, code string) (*GeoIPMatcher, error) {
 	target := strings.ToUpper(code)
 	pos := 0
 	for pos < len(data) {
@@ -48,7 +51,7 @@ func LoadGeoIP(path, code string) (*GeoIPMatcher, error) {
 		}
 		pos += pbSkip(data[pos:], int(tag&7))
 	}
-	return nil, fmt.Errorf("geoip: code %q not found in %s", code, path)
+	return nil, fmt.Errorf("geoip: code %q not found in %s", code, source)
 }
 
 // Match returns true if host is a bare IP address contained in one of the
@@ -58,6 +61,11 @@ func (m *GeoIPMatcher) Match(host string) bool {
 	if ip == nil {
 		return false
 	}
+	return m.MatchIP(ip)
+}
+
+// MatchIP checks an already-parsed IP against the loaded CIDR ranges.
+func (m *GeoIPMatcher) MatchIP(ip net.IP) bool {
 	for _, n := range m.nets {
 		if n.Contains(ip) {
 			return true

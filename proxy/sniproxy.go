@@ -151,6 +151,9 @@ func (s *SNIProxy) handleDomainFront(ctx context.Context, conn net.Conn, peekDat
 	}
 
 	tlsConfig := s.mitm.GetTLSConfig(sni)
+	if dft, ok := t.(*transport.DomainFrontTransport); ok {
+		tlsConfig = s.mitm.GetTLSConfigWithALPN(sni, dft.MITMALPNs())
+	}
 	if tlsConfig == nil {
 		log.Printf("[sni] domain_front: no TLS config for %s", sni)
 		return

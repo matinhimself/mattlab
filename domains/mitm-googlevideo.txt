@@ -1,0 +1,2 @@
+# Keep Google video on HTTP/1.1, matching the upstream MITM profile.
+.googlevideo.com

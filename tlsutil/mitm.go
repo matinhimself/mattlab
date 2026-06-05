@@ -1,6 +1,8 @@
 package tlsutil
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -65,20 +67,20 @@ func (m *MITMManager) CACertPath() string {
 // GetTLSConfig returns a *tls.Config for serving TLS with a cert valid for
 // the given domain, advertising only http/1.1 (matches Xray tls-decrypt-h11).
 func (m *MITMManager) GetTLSConfig(domain string) *tls.Config {
-	return m.GetTLSConfigWithALPN(domain, false)
+	return m.GetTLSConfigWithALPN(domain, []string{"http/1.1"})
 }
 
 // GetTLSConfigH2 returns a config that also advertises h2 in addition to
 // http/1.1 (matches Xray tls-decrypt-h211, used for Fastly CDN path).
 func (m *MITMManager) GetTLSConfigH2(domain string) *tls.Config {
-	return m.GetTLSConfigWithALPN(domain, true)
+	return m.GetTLSConfigWithALPN(domain, []string{"h2", "http/1.1"})
 }
 
-func (m *MITMManager) GetTLSConfigWithALPN(domain string, h2 bool) *tls.Config {
-	key := domain
-	if h2 {
-		key = domain + ":h2"
-	}
+// GetTLSConfigWithALPN returns a cached TLS config advertising the requested
+// protocols. Certificate generation happens outside the cache lock so a new
+// hostname does not stall unrelated handshakes.
+func (m *MITMManager) GetTLSConfigWithALPN(domain string, alpns []string) *tls.Config {
+	key := domain + ":" + strings.Join(alpns, ",")
 
 	m.mu.RLock()
 	if cfg, ok := m.certCache[key]; ok {
@@ -87,14 +89,18 @@ func (m *MITMManager) GetTLSConfigWithALPN(domain string, h2 bool) *tls.Config {
 	}
 	m.mu.RUnlock()
 
+	cfg := m.generateDomainConfig(domain, alpns)
+	if cfg == nil {
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if cfg, ok := m.certCache[key]; ok {
-		return cfg
+	if cached, ok := m.certCache[key]; ok {
+		return cached
 	}
 
-	cfg := m.generateDomainConfig(domain, h2)
 	m.certCache[key] = cfg
 	return cfg
 }
@@ -181,8 +187,8 @@ func (m *MITMManager) createCA(keyPath, certPath string) error {
 	return nil
 }
 
-func (m *MITMManager) generateDomainConfig(domain string, h2 bool) *tls.Config {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+func (m *MITMManager) generateDomainConfig(domain string, alpns []string) *tls.Config {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil
 	}
@@ -227,7 +233,11 @@ func (m *MITMManager) generateDomainConfig(domain string, h2 bool) *tls.Config {
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	// Combine domain cert + CA cert for full chain
 	fullChain := append(certPEM, m.caCertPEM...)
@@ -237,14 +247,10 @@ func (m *MITMManager) generateDomainConfig(domain string, h2 bool) *tls.Config {
 		return nil
 	}
 
-	protos := []string{"http/1.1"}
-	if h2 {
-		protos = []string{"h2", "http/1.1"}
-	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   protos,
+		NextProtos:   append([]string(nil), alpns...),
 	}
 }
 

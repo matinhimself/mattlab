@@ -21,7 +21,9 @@ type DoHResolver struct {
 func NewDoHResolver(dohURL string, t transport.Transport) *DoHResolver {
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// The outbound transport already returns a TLS connection.
+			// DialTLSContext prevents net/http from wrapping it a second time.
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return t.Dial(ctx, network, addr)
 			},
 		},

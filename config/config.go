@@ -51,11 +51,17 @@ type Outbound struct {
 	Type string `json:"type"` // "domain_front", "relay", "direct", "block", "sni_forward"
 
 	// domain_front fields
-	TargetIP    string   `json:"target_ip,omitempty"`   // single address (legacy); use target_ips instead
-	TargetIPs   []string `json:"target_ips,omitempty"`  // CDN edge addresses to try in order
+	TargetIP    string   `json:"target_ip,omitempty"`  // single address (legacy); use target_ips instead
+	TargetIPs   []string `json:"target_ips,omitempty"` // optional fallback or redirect CDN edge addresses
 	TargetPort  int      `json:"target_port,omitempty"`
-	FrontSNI    string   `json:"front_sni,omitempty"`   // empty = use each target address as its own SNI
-	Fingerprint string   `json:"fingerprint,omitempty"` // "chrome", "firefox", "safari", "edge", "random"
+	FrontSNI    string   `json:"front_sni,omitempty"`    // empty = use each target address as its own SNI
+	Fingerprint string   `json:"fingerprint,omitempty"`  // "chrome", "firefox", "safari", "edge", "random"
+	ALPN        []string `json:"alpn,omitempty"`         // protocols advertised to the MITM client
+	VerifyNames []string `json:"verify_names,omitempty"` // allowed upstream certificate names; "from_mitm" = client destination
+
+	DialOriginalDestination *bool `json:"dial_original_destination,omitempty"` // try the client destination before target_ips
+	DialConcurrency         int   `json:"dial_concurrency,omitempty"`          // max concurrent target attempts
+	DialFallbackDelayMS     int   `json:"dial_fallback_delay_ms,omitempty"`    // delay before racing the next target
 
 	// sni_forward fields
 	FrontAddr string `json:"front_addr,omitempty"` // host:port of CDN edge
@@ -72,10 +78,11 @@ type Outbound struct {
 // Route maps domain lists or GeoIP ranges to outbound tags.
 // Exactly one of Domains or (GeoIP+GeoCode) must be set.
 type Route struct {
-	Domains  string `json:"domains,omitempty"`  // path to .txt domain list file
-	GeoIP    string `json:"geoip,omitempty"`    // path to geoip.dat binary
-	GeoCode  string `json:"geocode,omitempty"`  // code inside geoip.dat, e.g. "FASTLY"
-	Outbound string `json:"outbound"`           // tag of an outbound
+	Domains  string `json:"domains,omitempty"` // path to .txt domain list file
+	GeoSite  string `json:"geosite,omitempty"` // path to geosite.dat binary
+	GeoIP    string `json:"geoip,omitempty"`   // path to geoip.dat binary
+	GeoCode  string `json:"geocode,omitempty"` // code inside geosite.dat or geoip.dat, e.g. "FASTLY"
+	Outbound string `json:"outbound"`          // tag of an outbound
 }
 
 // Load reads and validates a config file.
@@ -168,11 +175,30 @@ func (c *Config) Validate(cfgDir string) error {
 			if ob.TargetIP != "" && len(ob.TargetIPs) == 0 {
 				ob.TargetIPs = []string{ob.TargetIP}
 			}
-			if len(ob.TargetIPs) == 0 {
-				return fmt.Errorf("domain_front outbound %q requires target_ips (or target_ip)", ob.Tag)
-			}
 			if ob.TargetPort == 0 {
 				ob.TargetPort = 443
+			}
+			if len(ob.ALPN) == 0 {
+				ob.ALPN = []string{"http/1.1"}
+			}
+			if ob.DialOriginalDestination == nil {
+				enabled := true
+				ob.DialOriginalDestination = &enabled
+			}
+			if !*ob.DialOriginalDestination && len(ob.TargetIPs) == 0 {
+				return fmt.Errorf("domain_front outbound %q requires target_ips (or target_ip) when dial_original_destination is false", ob.Tag)
+			}
+			if ob.DialConcurrency == 0 {
+				ob.DialConcurrency = 4
+			}
+			if ob.DialConcurrency < 1 {
+				return fmt.Errorf("domain_front outbound %q dial_concurrency must be positive", ob.Tag)
+			}
+			if ob.DialFallbackDelayMS == 0 {
+				ob.DialFallbackDelayMS = 300
+			}
+			if ob.DialFallbackDelayMS < 0 {
+				return fmt.Errorf("domain_front outbound %q dial_fallback_delay_ms must not be negative", ob.Tag)
 			}
 		case "relay":
 			if ob.TargetIP == "" || ob.FrontSNI == "" {
@@ -212,13 +238,18 @@ func (c *Config) Validate(cfgDir string) error {
 			if _, err := os.Stat(domainPath); err != nil {
 				return fmt.Errorf("route domain file %q not found: %w", r.Domains, err)
 			}
+		case r.GeoSite != "" && r.GeoCode != "":
+			geoPath := filepath.Join(cfgDir, r.GeoSite)
+			if _, err := os.Stat(geoPath); err != nil {
+				return fmt.Errorf("route geosite file %q not found: %w", r.GeoSite, err)
+			}
 		case r.GeoIP != "" && r.GeoCode != "":
 			geoPath := filepath.Join(cfgDir, r.GeoIP)
 			if _, err := os.Stat(geoPath); err != nil {
 				return fmt.Errorf("route geoip file %q not found: %w", r.GeoIP, err)
 			}
 		default:
-			return fmt.Errorf("route for outbound %q must have either domains or geoip+geocode", r.Outbound)
+			return fmt.Errorf("route for outbound %q must have domains, geosite+geocode, or geoip+geocode", r.Outbound)
 		}
 	}
 

@@ -65,9 +65,17 @@ func NewOrchestrator(cfg *config.Config, cfgDir string) (*Orchestrator, error) {
 		case "block":
 			o.transports[ob.Tag] = transport.NewBlock()
 		case "domain_front":
-			o.transports[ob.Tag] = transport.NewDomainFront(
-				ob.TargetIPs, ob.TargetPort, ob.FrontSNI, ob.Fingerprint,
-			)
+			o.transports[ob.Tag] = transport.NewDomainFront(transport.DomainFrontConfig{
+				TargetAddrs:             ob.TargetIPs,
+				TargetPort:              ob.TargetPort,
+				FrontSNI:                ob.FrontSNI,
+				Fingerprint:             ob.Fingerprint,
+				ALPN:                    ob.ALPN,
+				VerifyNames:             ob.VerifyNames,
+				DialOriginalDestination: *ob.DialOriginalDestination,
+				DialConcurrency:         ob.DialConcurrency,
+				DialFallbackDelay:       time.Duration(ob.DialFallbackDelayMS) * time.Millisecond,
+			})
 		case "relay":
 			client := relay.NewClient(
 				ob.TargetIP, ob.TargetPort, ob.FrontSNI,
@@ -236,6 +244,9 @@ func (o *Orchestrator) printBanner() {
 				} else {
 					target = fmt.Sprintf("%s +%d", ob.TargetIPs[0], len(ob.TargetIPs)-1)
 				}
+			}
+			if target == "" {
+				target = "<original-destination>"
 			}
 			sni := ob.FrontSNI
 			if sni == "" {

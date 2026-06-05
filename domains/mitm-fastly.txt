@@ -1,0 +1,2 @@
+# Extra Fastly-backed domain outside the upstream geosite categories.
+.buzzfeed.com

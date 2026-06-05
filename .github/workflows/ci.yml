@@ -11,13 +11,29 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        go: ["1.24"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
+          go-version-file: go.mod
       - run: go vet ./...
       - run: go test -race -v ./...
       - run: go build -o mattlab .
+      - name: Verify runtime package
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p build/smoke
+          cp mattlab build/smoke/
+          bash ./packaging/copy-runtime-assets.sh build/smoke
+          test -s build/smoke/geoip.dat
+          test -s build/smoke/geosite.dat
+          test -s build/smoke/domains/mitm-blocked-ips.txt
+          set +e
+          (cd build/smoke && timeout 3 ./mattlab -c config.json >mattlab.log 2>&1)
+          status=$?
+          set -e
+          if [ "$status" -ne 124 ]; then
+            cat build/smoke/mattlab.log
+            exit 1
+          fi

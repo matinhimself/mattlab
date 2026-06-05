@@ -13,17 +13,17 @@ jobs:
     strategy:
       matrix:
         include:
-          - {goos: linux, goarch: amd64}
-          - {goos: linux, goarch: arm64}
-          - {goos: darwin, goarch: amd64}
-          - {goos: darwin, goarch: arm64}
-          - {goos: windows, goarch: amd64}
-          - {goos: windows, goarch: arm64}
+          - {goos: linux, goarch: amd64, ext: ""}
+          - {goos: linux, goarch: arm64, ext: ""}
+          - {goos: darwin, goarch: amd64, ext: ""}
+          - {goos: darwin, goarch: arm64, ext: ""}
+          - {goos: windows, goarch: amd64, ext: ".exe"}
+          - {goos: windows, goarch: arm64, ext: ".exe"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -31,17 +31,17 @@ jobs:
           CGO_ENABLED: 0
         run: |
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o mattlab-${{ matrix.goos }}-${{ matrix.goarch }} .
+            -o mattlab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} .
       - name: Archive
         run: |
+          mkdir -p build/package
+          cp mattlab-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} build/package/
+          bash ./packaging/copy-runtime-assets.sh build/package
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -r mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.zip \
-              mattlab-${{ matrix.goos }}-${{ matrix.goarch }} \
-              domains/ config.example.json geoip.dat
+            (cd build/package && zip -r ../../mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.zip .)
           else
             tar czf mattlab-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz \
-              mattlab-${{ matrix.goos }}-${{ matrix.goarch }} \
-              domains/ config.example.json geoip.dat
+              -C build/package .
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -69,8 +69,8 @@ jobs:
           mkdir -p build/deb/DEBIAN
           cp mattlab-linux-${{ matrix.arch }} build/deb/opt/mattlab/mattlab
           cp domains/*.txt build/deb/opt/mattlab/domains/
-          cp config.example.json build/deb/opt/mattlab/
-          cp geoip.dat build/deb/opt/mattlab/
+          cp config.json config.example.json config.mitm-domain-fronting.example.json build/deb/opt/mattlab/
+          cp geoip.dat geosite.dat build/deb/opt/mattlab/
           export VERSION=${{ github.ref_name }}
           export ARCH=${{ matrix.arch }}
           envsubst < packaging/deb/control.tmpl > build/deb/DEBIAN/control
